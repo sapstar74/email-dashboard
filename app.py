@@ -20,13 +20,13 @@ st.set_page_config(page_title="Email Dashboard", page_icon="📧", layout="wide"
 
 st.markdown("""
 <style>
-.metric-card { background:#f8f9fa; border-radius:12px; padding:16px 20px;
-               text-align:center; border:1px solid #e9ecef; }
-.metric-label { font-size:12px; color:#6c757d; margin-bottom:4px; }
-.metric-value { font-size:28px; font-weight:600; color:#212529; }
-.metric-sub   { font-size:11px; color:#adb5bd; margin-top:2px; }
-.section-title { font-size:15px; font-weight:600; color:#495057;
-                 margin:20px 0 10px; padding-bottom:6px; border-bottom:1px solid #e9ecef; }
+.metric-card { background:var(--color-background-secondary); border-radius:12px; padding:16px 20px;
+               text-align:center; border:1px solid var(--color-border-tertiary); }
+.metric-label { font-size:12px; color:var(--color-text-secondary); margin-bottom:4px; }
+.metric-value { font-size:28px; font-weight:600; color:var(--color-text-primary); }
+.metric-sub   { font-size:11px; color:var(--color-text-tertiary); margin-top:2px; }
+.section-title { font-size:15px; font-weight:600; color:var(--color-text-primary);
+                 margin:20px 0 10px; padding-bottom:6px; border-bottom:1px solid var(--color-border-tertiary); }
 </style>
 """, unsafe_allow_html=True)
 
@@ -549,10 +549,23 @@ with tabs[tidx["📊 Összesítés"]]:
                     subj     = m["subject"] or "(nincs tárgy)"
                     col_info, col_btn = st.columns([7,1])
                     with col_info:
-                        st.markdown(f"""<div style="padding:6px 0;border-bottom:1px solid #f1f3f5;">
-                          <span style="font-size:11px;color:#adb5bd">{date_str} &nbsp;·&nbsp; </span>
-                          <span style="font-size:12px;color:#6c757d">{addr}</span><br>
-                          <span style="font-size:13px;color:#212529;font-weight:500">{subj[:100]}</span>
+                        st.markdown(f"""<div style="
+                              padding:10px 12px;
+                              margin-bottom:6px;
+                              border-radius:8px;
+                              border:1px solid var(--color-border-tertiary);
+                              background:var(--color-background-secondary);">
+                          <div style="font-size:11px;
+                                      color:var(--color-text-tertiary);
+                                      margin-bottom:3px;">
+                            {date_str} &nbsp;·&nbsp; {addr}
+                          </div>
+                          <div style="font-size:14px;
+                                      font-weight:500;
+                                      color:var(--color-text-primary);
+                                      line-height:1.4;">
+                            {subj[:100]}
+                          </div>
                         </div>""", unsafe_allow_html=True)
                     with col_btn:
                         if st.button("📖", key=f"open_{m['id']}", help="Levél megnyitása"):
@@ -567,12 +580,15 @@ with tabs[tidx["📊 Összesítés"]]:
                 with st.spinner("Levél betöltése…"):
                     body = get_message_body_cached(service, mv_id)
 
-                st.markdown(f"""<div style="background:#f8f9fa;border-radius:8px;padding:14px 18px;
-                    margin-bottom:12px;border:1px solid #e9ecef;">
-                  <div style="font-size:12px;color:#6c757d;margin-bottom:4px">{body['date']}</div>
-                  <div style="font-size:13px"><b>Feladó:</b> {body['from']}</div>
-                  <div style="font-size:13px"><b>Címzett:</b> {body['to']}</div>
-                  <div style="font-size:15px;font-weight:600;margin-top:8px">{body['subject']}</div>
+                st.markdown(f"""<div style="background:var(--color-background-secondary);
+                    border-radius:8px;padding:14px 18px;margin-bottom:12px;
+                    border:1px solid var(--color-border-tertiary);">
+                  <div style="font-size:12px;color:var(--color-text-tertiary);margin-bottom:6px">{body['date']}</div>
+                  <div style="font-size:13px;color:var(--color-text-secondary);margin-bottom:2px">
+                    <span style="color:var(--color-text-tertiary)">Feladó:</span> {body['from']}</div>
+                  <div style="font-size:13px;color:var(--color-text-secondary);margin-bottom:8px">
+                    <span style="color:var(--color-text-tertiary)">Címzett:</span> {body['to']}</div>
+                  <div style="font-size:16px;font-weight:600;color:var(--color-text-primary)">{body['subject']}</div>
                 </div>""", unsafe_allow_html=True)
 
                 if body["html"]:
