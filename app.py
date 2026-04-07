@@ -2,12 +2,14 @@ import streamlit as st
 import json
 import base64
 import re
+import time
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 from email.utils import parsedate_to_datetime
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 import pandas as pd
 import plotly.graph_objects as go
 
@@ -81,12 +83,29 @@ def fetch_messages_cached(_service, query, max_results=500):
             break
     return messages
 
+def api_call_with_retry(fn, retries=4, base_delay=2):
+    """503/500 hibánál automatikusan újrapróbál, exponenciális várakozással."""
+    for attempt in range(retries):
+        try:
+            return fn()
+        except HttpError as e:
+            if e.resp.status in (500, 503) and attempt < retries - 1:
+                wait = base_delay * (2 ** attempt)  # 2, 4, 8, 16 mp
+                time.sleep(wait)
+            else:
+                raise
+        except Exception:
+            raise
+
 @st.cache_data(ttl=300, show_spinner=False)
 def get_message_meta_cached(_service, msg_id):
-    msg = _service.users().messages().get(
-        userId="me", id=msg_id, format="metadata",
-        metadataHeaders=["From", "To", "Subject", "Date"],
-    ).execute()
+    def _fetch():
+        return _service.users().messages().get(
+            userId="me", id=msg_id, format="metadata",
+            metadataHeaders=["From", "To", "Subject", "Date"],
+        ).execute()
+
+    msg     = api_call_with_retry(_fetch)
     headers = msg.get("payload", {}).get("headers", [])
     return {
         "id":       msg_id,
@@ -218,14 +237,102 @@ def delta_html(v1, v2, lower_is_better=False):
     return f'<div style="font-size:12px;color:{color}">{arrow} {abs(diff):.0f} ({pct:.0f}%)</div>'
 
 def bar_row(label, cnt, max_c, color):
+    """Statikus sáv – összehasonlítás tabban használt."""
+    pct = round(cnt / max_c * 100)
     return f"""<div style="margin-bottom:8px;">
       <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:3px;">
         <span style="color:#495057;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:80%">{label}</span>
         <span style="color:#6c757d;font-weight:600">{cnt}</span>
       </div>
       <div style="background:#e9ecef;border-radius:4px;height:5px;">
-        <div style="background:{color};width:{cnt/max_c*100:.0f}%;height:5px;border-radius:4px;"></div>
+        <div style="background:{color};width:{pct}%;height:5px;border-radius:4px;"></div>
       </div></div>"""
+
+def interactive_bar_chart(items, color, chart_id, inbox_data):
+    """Kattintható sávdiagram – kattintásra megjelennek a levelek."""
+    if not items:
+        return ""
+    max_c = items[0][1]
+
+    index = defaultdict(list)
+    for m in inbox_data:
+        addr = extract_addr(m["from"])
+        index[addr].append(m)
+        s = re.sub(r"^(re:|fwd?:|aw:)\s*", "", m["subject"], flags=re.IGNORECASE).strip()
+        key = " ".join(s.split()[:5]) or "(nincs tárgy)"
+        if key not in index or m not in index[key]:
+            index[key].append(m)
+
+    chart_data = []
+    for label, cnt in items:
+        msgs = index.get(label, [])
+        chart_data.append({
+            "label": label,
+            "count": cnt,
+            "pct":   round(cnt / max_c * 100),
+            "msgs":  [{"date": m["date"].strftime("%Y-%m-%d %H:%M") if m["date"] else "—",
+                       "from": m["from"],
+                       "subj": m["subject"][:120],
+                       "id":   m["id"]} for m in sorted(msgs,
+                           key=lambda x: x["date"] or datetime.min.replace(tzinfo=timezone.utc),
+                           reverse=True)[:30]]
+        })
+
+    data_json = json.dumps(chart_data, ensure_ascii=False)
+
+    return f"""
+<div id="{chart_id}_wrap" style="font-family:sans-serif;">
+  <div id="{chart_id}_bars"></div>
+  <div id="{chart_id}_panel" style="display:none;margin-top:12px;border:1px solid #dee2e6;
+       border-radius:8px;overflow:hidden;">
+    <div style="background:#f8f9fa;padding:10px 14px;display:flex;justify-content:space-between;
+         align-items:center;border-bottom:1px solid #dee2e6;">
+      <span id="{chart_id}_panel_title" style="font-weight:600;font-size:13px;color:#212529;"></span>
+      <button onclick="document.getElementById(\'{chart_id}_panel\').style.display=\'none\'"
+        style="border:none;background:none;font-size:18px;cursor:pointer;color:#6c757d;line-height:1;">x</button>
+    </div>
+    <div id="{chart_id}_panel_body" style="max-height:320px;overflow-y:auto;"></div>
+  </div>
+</div>
+<script>
+(function() {{
+  var data  = {data_json};
+  var color = "{color}";
+  var cid   = "{chart_id}";
+  var wrap  = document.getElementById(cid + "_bars");
+  data.forEach(function(item) {{
+    var row = document.createElement("div");
+    row.style.cssText = "margin-bottom:8px;cursor:pointer;padding:4px 6px;border-radius:6px;transition:background .15s";
+    row.onmouseover = function() {{ this.style.background="#f1f3f5"; }};
+    row.onmouseout  = function() {{ this.style.background=""; }};
+    row.innerHTML =
+      "<div style=\"display:flex;justify-content:space-between;font-size:13px;margin-bottom:3px;\">" +
+      "<span style=\"color:#495057;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:82%\">" + item.label + "</span>" +
+      "<span style=\"color:#6c757d;font-weight:600\">" + item.count + "</span></div>" +
+      "<div style=\"background:#e9ecef;border-radius:4px;height:6px;\">" +
+      "<div style=\"background:" + color + ";width:" + item.pct + "%;height:6px;border-radius:4px;\"></div></div>";
+    row.onclick = function() {{
+      var panel = document.getElementById(cid + "_panel");
+      var title = document.getElementById(cid + "_panel_title");
+      var body  = document.getElementById(cid + "_panel_body");
+      title.textContent = item.label + "  (" + item.count + " lev\u00e9l)";
+      if (!item.msgs || item.msgs.length === 0) {{
+        body.innerHTML = "<div style=\"padding:16px;color:#6c757d;font-size:13px;\">Nincs megjelen\u00edthet\u0151 lev\u00e9l.</div>";
+      }} else {{
+        body.innerHTML = item.msgs.map(function(m) {{
+          return "<div style=\"padding:10px 14px;border-bottom:1px solid #f1f3f5;\">" +
+            "<div style=\"font-size:11px;color:#adb5bd;margin-bottom:2px;\">" + m.date + "</div>" +
+            "<div style=\"font-size:12px;color:#6c757d;margin-bottom:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;\">" + m.from + "</div>" +
+            "<div style=\"font-size:13px;color:#212529;font-weight:500;\">" + m.subj + "</div></div>";
+        }}).join("");
+      }}
+      panel.style.display = "block";
+      panel.scrollIntoView({{behavior:"smooth", block:"nearest"}});
+    }};
+    wrap.appendChild(row);
+  }});
+}})();
+</script>"""
 
 def preset_dates(mode, now):
     if mode == "Aktuális hét":
@@ -371,11 +478,12 @@ with tabs[tidx["📊 Összesítés"]]:
     left, right = st.columns(2)
 
     with left:
-        st.markdown('<div class="section-title">👤 Top feladók</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-title">👤 Top feladók <small style="font-weight:400;color:#adb5bd">– kattints egy sávra a levelekért</small></div>', unsafe_allow_html=True)
         if stats1["top_senders"]:
-            mc = stats1["top_senders"][0][1]
-            for addr, cnt in stats1["top_senders"]:
-                st.markdown(bar_row(addr, cnt, mc, "#4361ee"), unsafe_allow_html=True)
+            st.components.v1.html(
+                interactive_bar_chart(stats1["top_senders"], "#4361ee", "senders", res["inbox1"]),
+                height=len(stats1["top_senders"]) * 36 + 20, scrolling=False
+            )
         st.markdown('<div class="section-title">⏱ Válaszidő részletek</div>', unsafe_allow_html=True)
         r1,r2,r3 = st.columns(3)
         r1.metric("Átlagos", fmt_hours(stats1["avg_resp_h"]))
@@ -383,11 +491,12 @@ with tabs[tidx["📊 Összesítés"]]:
         r3.metric("Mért szálak", stats1["resp_count"])
 
     with right:
-        st.markdown('<div class="section-title">📋 Leggyakoribb témák</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-title">📋 Leggyakoribb témák <small style="font-weight:400;color:#adb5bd">– kattints egy sávra a levelekért</small></div>', unsafe_allow_html=True)
         if stats1["top_subjects"]:
-            mc = stats1["top_subjects"][0][1]
-            for subj, cnt in stats1["top_subjects"]:
-                st.markdown(bar_row(subj, cnt, mc, "#7209b7"), unsafe_allow_html=True)
+            st.components.v1.html(
+                interactive_bar_chart(stats1["top_subjects"], "#7209b7", "subjects", res["inbox1"]),
+                height=len(stats1["top_subjects"]) * 36 + 20, scrolling=False
+            )
 
     st.markdown('<div class="section-title">⏳ Válaszolatlan levelek</div>', unsafe_allow_html=True)
     if stats1["unanswered"]:
