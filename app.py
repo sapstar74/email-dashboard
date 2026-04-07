@@ -116,6 +116,45 @@ def get_message_meta_cached(_service, msg_id):
         "threadId": msg.get("threadId", ""),
     }
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_message_body_cached(_service, msg_id):
+    """Levél teljes tartalmának lekérése – csak kattintásra hívódik meg."""
+    def _fetch():
+        return _service.users().messages().get(
+            userId="me", id=msg_id, format="full"
+        ).execute()
+    msg = api_call_with_retry(_fetch)
+
+    def decode_part(part):
+        data = part.get("body", {}).get("data", "")
+        if data:
+            import base64 as b64
+            return b64.urlsafe_b64decode(data + "==").decode("utf-8", errors="replace")
+        return ""
+
+    def extract_text(payload):
+        mime = payload.get("mimeType", "")
+        if mime == "text/plain":
+            return decode_part(payload), ""
+        if mime == "text/html":
+            return "", decode_part(payload)
+        plain, html = "", ""
+        for part in payload.get("parts", []):
+            p, h = extract_text(part)
+            plain += p; html += h
+        return plain, html
+
+    headers = msg.get("payload", {}).get("headers", [])
+    plain, html = extract_text(msg.get("payload", {}))
+    return {
+        "from":    get_header(headers, "From"),
+        "to":      get_header(headers, "To"),
+        "subject": get_header(headers, "Subject"),
+        "date":    get_header(headers, "Date"),
+        "plain":   plain.strip(),
+        "html":    html.strip(),
+    }
+
 @st.cache_data(ttl=600, show_spinner=False)
 def get_label_map(_service):
     resp   = _service.users().labels().list(userId="me").execute()
@@ -461,18 +500,94 @@ tidx = {n: i for i, n in enumerate(tab_names)}
 # ═══════════════════════════════════════════════════════════════════════════════
 with tabs[tidx["📊 Összesítés"]]:
     st.caption(f"**{lbl1}** · {res['label']}")
+
+    # Metric kártyák – Beérkezett és Küldött kattintható
     c1,c2,c3,c4 = st.columns(4)
-    for col, lbl, val, unit in [
-        (c1,"📥 Beérkezett",    stats1["inbox_count"],          "levél"),
-        (c2,"📤 Küldött",       stats1["sent_count"],           "levél"),
-        (c3,"⏳ Válaszolatlan", len(stats1["unanswered"]),      "levél"),
-        (c4,"⚡ Válaszidő",     fmt_hours(stats1["avg_resp_h"]),""),
-    ]:
-        with col:
-            st.markdown(f"""<div class="metric-card">
-              <div class="metric-label">{lbl}</div>
-              <div class="metric-value">{val}</div>
-              <div class="metric-sub">{unit}</div></div>""", unsafe_allow_html=True)
+
+    with c1:
+        if st.button(f"📥 Beérkezett\n{stats1['inbox_count']} levél", use_container_width=True, key="btn_inbox"):
+            st.session_state["msg_view"] = ("inbox", None)
+    with c2:
+        if st.button(f"📤 Küldött\n{stats1['sent_count']} levél", use_container_width=True, key="btn_sent"):
+            st.session_state["msg_view"] = ("sent", None)
+    with c3:
+        st.markdown(f"""<div class="metric-card">
+          <div class="metric-label">⏳ Válaszolatlan</div>
+          <div class="metric-value">{len(stats1["unanswered"])}</div>
+          <div class="metric-sub">levél</div></div>""", unsafe_allow_html=True)
+    with c4:
+        st.markdown(f"""<div class="metric-card">
+          <div class="metric-label">⚡ Válaszidő</div>
+          <div class="metric-value">{fmt_hours(stats1["avg_resp_h"])}</div>
+          <div class="metric-sub"></div></div>""", unsafe_allow_html=True)
+
+    # ── Levéllista panel ──────────────────────────────────────────────────────
+    mv = st.session_state.get("msg_view")
+    if mv:
+        mv_type, mv_id = mv
+        source = res["inbox1"] if mv_type == "inbox" else res["sent1"]
+        label_str = "Beérkezett" if mv_type == "inbox" else "Küldött"
+
+        with st.container():
+            hdr, close_col = st.columns([8,1])
+            with hdr:
+                st.markdown(f'<div class="section-title">{"📥" if mv_type=="inbox" else "📤"} {label_str} levelek</div>', unsafe_allow_html=True)
+            with close_col:
+                if st.button("✕ Bezár", key="close_msglist"):
+                    st.session_state.pop("msg_view", None)
+                    st.rerun()
+
+            if mv_id is None:
+                # Levéllista – subject-ek
+                sorted_msgs = sorted(source,
+                    key=lambda x: x["date"] or datetime.min.replace(tzinfo=timezone.utc),
+                    reverse=True)[:200]
+
+                for i, m in enumerate(sorted_msgs):
+                    date_str = m["date"].strftime("%Y-%m-%d %H:%M") if m["date"] else "—"
+                    addr     = extract_addr(m["from"]) if mv_type=="inbox" else extract_addr(m.get("to",""))
+                    subj     = m["subject"] or "(nincs tárgy)"
+                    col_info, col_btn = st.columns([7,1])
+                    with col_info:
+                        st.markdown(f"""<div style="padding:6px 0;border-bottom:1px solid #f1f3f5;">
+                          <span style="font-size:11px;color:#adb5bd">{date_str} &nbsp;·&nbsp; </span>
+                          <span style="font-size:12px;color:#6c757d">{addr}</span><br>
+                          <span style="font-size:13px;color:#212529;font-weight:500">{subj[:100]}</span>
+                        </div>""", unsafe_allow_html=True)
+                    with col_btn:
+                        if st.button("📖", key=f"open_{m['id']}", help="Levél megnyitása"):
+                            st.session_state["msg_view"] = (mv_type, m["id"])
+                            st.rerun()
+            else:
+                # Levél teljes tartalma
+                if st.button("← Vissza a listához", key="back_to_list"):
+                    st.session_state["msg_view"] = (mv_type, None)
+                    st.rerun()
+
+                with st.spinner("Levél betöltése…"):
+                    body = get_message_body_cached(service, mv_id)
+
+                st.markdown(f"""<div style="background:#f8f9fa;border-radius:8px;padding:14px 18px;
+                    margin-bottom:12px;border:1px solid #e9ecef;">
+                  <div style="font-size:12px;color:#6c757d;margin-bottom:4px">{body['date']}</div>
+                  <div style="font-size:13px"><b>Feladó:</b> {body['from']}</div>
+                  <div style="font-size:13px"><b>Címzett:</b> {body['to']}</div>
+                  <div style="font-size:15px;font-weight:600;margin-top:8px">{body['subject']}</div>
+                </div>""", unsafe_allow_html=True)
+
+                if body["html"]:
+                    st.components.v1.html(
+                        f"""<div style="font-family:sans-serif;font-size:14px;
+                            line-height:1.6;color:#212529;padding:4px">
+                          {body["html"]}
+                        </div>""",
+                        height=600, scrolling=True
+                    )
+                elif body["plain"]:
+                    st.text_area("Tartalom", body["plain"], height=400)
+                else:
+                    st.info("A levél tartalma nem jeleníthető meg.")
+        st.markdown("---")
 
     st.markdown("---")
     left, right = st.columns(2)
